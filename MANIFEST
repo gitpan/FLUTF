@@ -1,0 +1,4 @@
+MANIFEST
+Makefile.PL
+lib/Games/Freelancer/UTF.pm
+t/0_basic.t
