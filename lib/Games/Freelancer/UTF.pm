@@ -16,12 +16,19 @@
 ###############################################################################
 
 package Games::Freelancer::UTF;
-require Tie::InsertOrderHash;
+use Exporter;
+{
+	no warnings qw/portable/; #Why is this so hard... :(
+	local $^W=0; #Grrr @ Tie::InsertOrderHash;
+	require Tie::InsertOrderHash;
+}
 use strict;
 use warnings;
-no warnings 'recursion';
+use warnings::register;
 
-our $VERSION = 0.9;
+use Carp;
+
+our $VERSION = 1.001;
 
 =head1 NAME
 
@@ -143,6 +150,15 @@ sub UTFwrite {
 	return UTFwriteUTF(@_);
 }
 
+=head1 INTERNAL FUNCTIONS (use with care)
+
+=head2 get (SOURCE, OFFSET, LENTGH)
+
+Extracts a string of LENGTH at OFFSET of the SOURCE.
+
+Used for general file reading.
+
+=cut
 
 #Internal functions:
 
@@ -157,26 +173,52 @@ sub get {
 	return substr($_[0],$off,$_[2]);
 }
 
+=head2 string (OFFSET)
+
+Extracts a string \0 delimited string at OFFSET out of the stringlibrary of the file.
+
+Used for key names
+
+=cut
+
 #my $string = string($offset)
 #Returns a string of stringlib, which is a compilation of \0 strings starting a $offset.
 #Returns string without the trailing \0.
 
 sub string {
-	return "" if $_[0] >= length $strings; #THIS IS AN ERROR IN THE UTF FILE
+	if ($_[0] >= length $strings) { #THIS IS AN ERROR IN THE UTF FILE
+		warnings::warnif("Requested a string from outside of the string lib, this is an error in the file or something the parser doesn't know about.");	
+		return "" ; 
+	}
 	my $shift=index($strings,"\0",$_[0]) - $_[0];
 	return substr($strings,$_[0],$shift);
 }
+
+=head2 data (OFFSET, LENGTH)
+
+Extracts data from an OFFSET with specific LENGTH out of the datalibrary of the file.
+
+Used for data nodes
+
+=cut
 
 #my $data=data($start,$length);
 #Returns a string of the datalib, which is just a bunch of data, starting at $start with a length of $length.
 
 sub data {
-	return "" if $_[0] >= length $datas; #THIS IS AN ERROR IN THE UTF FILE
+	if ($_[0] >= length $datas) {#THIS IS AN ERROR IN THE UTF FILE
+		warnings::warnif("Requested data from outside of the data lib, this is an error in the file or something the parser doesn't know about.");	
+		return "" ;
+	}
 	return substr($datas,$_[0],$_[1]);
 }
 
 
+=head2 UTFreadUTFrek( TREE, NODEID )
 
+Parses a node with NODEID out of the binary TREE, then calls itself with all the childnodes and siblingnodes
+
+=cut
 
 #Parses a UTF node recursive:
 #node
@@ -194,21 +236,26 @@ sub data {
 #	dword time3
 #} = 44 bytes
 
+
+
 sub UTFreadUTFrek {
+	no warnings 'recursion';
 	local $_;
 	my $tree=shift;
 	my $i=shift;
-	return {} if $offsets{$i}++;
-	return {} if $i > length($tree)-44;
+	if ($offsets{$i}++) {
+		warnings::warnif("Somehow the file managed to request the same node again, this is ignored");
+		return {};
+	}
+	if ($i > length($tree)-44) {
+		warnings::warnif("Requested a node from outside of the TREE, this is an error in the file or something the parser doesn't know about.");
+		return {};
+	}
 	tie my %data => 'Tie::InsertOrderHash';
-	#print $i;
-	
 	my ($silb, $name, $flags, $z, $childoffset, $alloc, $size, $size2, $time1, $time2, $time3) = unpack("VVVVVVVVVVV", substr($tree,$i));
-	#print ' $silb, $name, $flags, $z, $childoffset, $alloc, $size, $size2, $time1, $time2, $time3 = ',"($silb, $name, $flags, $z, $childoffset, $alloc, $size, $size2, $time1, $time2, $time3)\n";
 	# Now we must use all the stuff here or warning will annoy us:
 	($time1, $time2, $time3) = ($time1, $time2, $time3);
 	$size=$size2 if ($size2 < $size);
-#	die "Allocation error in $i" if ($alloc < $size);
 	if ($flags & 0x10 and not $flags & 0x80) {
 		$data{string($name)}=UTFreadUTFrek($tree,$childoffset);
 	}
@@ -223,6 +270,15 @@ sub UTFreadUTFrek {
 	return \%data;
 
 }
+
+=head2 packString (STRING)
+
+Saves a STRING to the stringlib and returns an offset. Tests if the string already exists.
+
+Used for writing Nodenames (keys)
+
+=cut
+
 #$offset = packString($string)
 
 #Packs a string and returns the offset.
@@ -239,6 +295,14 @@ sub packString {
 	}
 
 }
+
+=head2 packData (DATA)
+
+Saves a string with DATA to the datalib and returns an offset. Tests if the data already exists.
+
+Used for writing nodedata (values)
+
+=cut
 
 #$offset = packData($data)
 
@@ -260,14 +324,25 @@ sub packData {
 
 #Writes UTF nodes recursive.
 
+=head2 UTFwriteUTFrek (DATA, NAME, SIBLING)
+
+Writes hashref or a scalar into the tree.
+
+SIBLING is true if there is a next sibling node (different output on nodes without a next one)
+
+Calls itself again for each entry of a hashref. (Writes the children)
+
+=cut
+
 sub UTFwriteUTFrek {
+	no warnings 'recursion';
 	local $_;
 	my $tree=shift;
 	my $name=shift;
 	my $silb=shift;
 	$pointer+=44;
 	my $start=$pointer;
-	die "Can't pack other then scalar or Hashrefs" if ref $tree and ref $tree ne "HASH";
+	croak "Can't pack other then scalar or Hashrefs" if ref $tree and ref $tree ne "HASH";
 	return pack ("VVVVVVVVVVV",$silb?$pointer:0, packString($name), 0x80, 0, packData($tree), length($tree), length($tree), length($tree), 0, 0, 0) unless ref $tree;
 	my $code="";
 	my @list = keys(%$tree);
@@ -297,6 +372,14 @@ sub UTFwriteUTFrek {
 
 #Reads the UTF header, extracts data and string libraries and starts parsing the nodes
 
+=head2 UTFreadUTF ( DATA )
+
+Extracts and parses an UTF header from the scalar DATA.
+
+Splits the file in TREE, STRINGLIB and DATALIB according to the header and then calls UTFreadUTFrek on the TREE.
+
+=cut
+
 sub UTFreadUTF{
 	my $code=shift;
 	my $i=0;
@@ -317,12 +400,18 @@ sub UTFreadUTF{
 		return UTFreadUTFrek($tree,0);
 	}
 	else {
-		die "NOT a UTF File";
+		croak "NOT a UTF File";
 	}
 	
 }
 
 #Writes an UTF file with header and nodes.
+
+=head2 UTFwriteUTF (TREE(HASHREF) )
+
+Calls UTFwriteUTFrek and then return the header, TREE, STRINGLIB and DATALIB 
+
+=cut 
 
 sub UTFwriteUTF{
 	my $tree=shift;
@@ -343,73 +432,83 @@ sub UTFwriteUTF{
 	
 }
 
+1;
 
-=head2 Example tree
+__END__
 
-This is an example of deparsed tree of a very basic model a friend of mine made:
+=head1 Example tree
+
+This is an example of deparsed tree of a very basic model (.cmp) a friend of mine made, there are however other types of UTF files.
+
+Every UTF file seems to have a root node called \.
 
 	$tree = {
-		  '\\' => {
-			    'VMeshLibrary' => {
-						'jc_defender.lod0.vms' => {
-									    'VMeshData' => 'Some Vmeshdata' #Removed by me because you can't see anything useful here and its large.
-									  }
-					      },
-			    'Cmpnd' => {
-					 'Root' => {
-						     'File name' => 'jc_defender.3db ',
-						     'Index' => '        ',
-						     'Object name' => 'Root '
-						   }
-				       },
-			    'jc_defender.3db' => {
-						   'Hardpoints' => {
-								     'Fixed' => {
-										  'HpEngine01' => {
-												    'Orientation' => '  €?              €?              €?', #These are just packed vectors, can be easily decoded using unpack("f*",this)
-												    'Position' => '    IK¿×A' #also a vector: unpack("f*",this)
-												  },
-	 
-										}
-								     'Revolute' => {
-										     'HpWeapon01' => {
-												       'Axis' => '      €?    ', #also a vector: unpack("f*",this)
-												       'Max' => '’
-	†>    ', #an angle in radians: unpack("f*",this)
-												       'Min' => '’
-	†¾    ',
-												       'Orientation' => 'Z|¿âÐ1¾   €âÐ1>Z|¿           €  €?', #also a vector: unpack("f*",this)
-												       'Position' => '­L€?Œø®>¿+±À' #also a vector: unpack("f*",this)
-												     },
-										     'HpWeapon02' => {
-												       'Axis' => '      €?    ',
-												       'Max' => '’
-	†>    ',
-												       'Min' => '’
-	†¾    ',
-												       'Orientation' => 'Z|¿âÐ1>    âÐ1¾Z|¿              €?', 
-												       'Position' => 'r¿Œø®>¿+±À'
-												     }
-										   }
-								   },
-						   'MultiLevel' => {
-								     'Level0' => {
-										   'VMeshPart' => {
-												    'VMeshRef' => '<   Úý  x  n   ¯Ë@ÄËÀ“°š?d÷¤¿-¬Aï7Á `Ž:m$½€ð¢½ä,A'
-												  }
-										 }
-								   }
-						 }
-			  }
-		};
+	    '\\' => {
+	        'VMeshLibrary' => {
+	            'jc_defender.lod0.vms' => { #Contains the model data
+	                'VMeshData' => 'Some Vmeshdata' #Removed by me because you can't see anything useful here and its large.
+	            }
+	        },
+	        'Cmpnd' => {
+	            'Root' => {
+	                'File name' => 'jc_defender.3db ', #Links the frist model
+	                'Index' => '        ', #Index 0
+	                'Object name' => 'Root ' #Name of that model.
+	            }
+	        },
+	        'jc_defender.3db' => { #A model, a file can have multiple .3db (model) files in them
+	            'Hardpoints' => { #The game lets you mount things on this Points
+	                'Fixed' => { #Not rotatebale
+	                    'HpEngine01' => {
+	                        #These are just packed vectors, can be easily decoded using unpack("f*",this)
+	                        'Orientation' => '  €?              €?              €?',
+	                        'Position' => '    IK¿×A' #also a vector: unpack("f*",this)
+	                    },
+	                }
+	                'Revolute' => { #For weapons mostly, follow the cursor.
+	                    'HpWeapon01' => {
+	                        'Axis' => '      €?    ', #also a vector: unpack("f*",this)
+	                        'Max' => '’†>    ', #an angle in radians: unpack("f*",this)
+	                        'Min' => '’†¾    ',
+	                        'Orientation' => 'Z|¿âÐ1¾   €âÐ1>Z|¿           €  €?', #also a vector: unpack("f*",this)
+	                        'Position' => '­L€?Œø®>¿+±À' #also a vector: unpack("f*",this)
+	                    },
+	                    'HpWeapon02' => {
+	                        'Axis' => '      €?    ',
+	                        'Max' => '’†>    ',
+	                        'Min' => '’†¾    ',
+	                        'Orientation' => 'Z|¿âÐ1>    âÐ1¾Z|¿              €?', 
+	                        'Position' => 'r¿Œø®>¿+±À'
+	                    }
+	                }
+	            },
+	            'MultiLevel' => {
+	                'Level0' => {
+	                    'VMeshPart' => {
+	                        #This contains a reference to the VMeshdata up there
+	                        'VMeshRef' => '<   Úý  x  n   ¯Ë@ÄËÀ“°š?d÷¤¿-¬Aï7Á `Ž:m$½€ð¢½ä,A'
+	                    }
+	                }
+	            }
+	        }
+	    }
+	};
 
 I cut out the VMesh part which is just binary data, but it can be read using L<Games::Freelancer::VMesh>
 
-=head 1 SEE ALSO
+=head1 SEE ALSO
 
 L<Games::Freelancer::VMesh> for in UTF files included VMeshData and VMeshRef values.
 
 L<Games::Freelancer::BINI> for another type of file used by Freelancer.
+
+=head1 LICENSE
+
+UTF.pm is published under the terms of the MIT license, which basically 
+means "Do with it whatever you want". For more information, see the license.txt
+file that should be enclosed with this distribution. A copy of the license
+is (at the time of this writing) also available at
+L<http://www.opensource.org/licenses/mit-license.php>.
 
 =head1 AUTHOR
 
@@ -417,4 +516,4 @@ Marc "Maluku" Sebastian Lucksch
 perl@marc-s.de
 
 =cut
-1;
+
